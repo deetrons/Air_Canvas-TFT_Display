@@ -1,0 +1,173 @@
+import numpy as np
+import cv2
+import requests
+import time
+from collections import deque
+
+# ================= ESP8266 =================
+ESP_IP = ""   # CHANGE THIS esp8266 ip
+DRAW_URL = f"http://{ESP_IP}/draw"
+CLEAR_URL = f"http://{ESP_IP}/clear"
+
+SEND_DELAY = 0.03
+MOVE_THRESHOLD = 4
+last_send = time.time()
+last_x, last_y = -1, -1
+
+# ================= TRACKBARS =================
+def nothing(x): pass
+
+cv2.namedWindow("Color detectors")
+cv2.createTrackbar("Upper Hue", "Color detectors", 130, 180, nothing)
+cv2.createTrackbar("Upper Saturation", "Color detectors", 255, 255, nothing)
+cv2.createTrackbar("Upper Value", "Color detectors", 255, 255, nothing)
+cv2.createTrackbar("Lower Hue", "Color detectors", 90, 180, nothing)
+cv2.createTrackbar("Lower Saturation", "Color detectors", 80, 255, nothing)
+cv2.createTrackbar("Lower Value", "Color detectors", 40, 255, nothing)
+
+kernel = np.ones((5,5), np.uint8)
+
+# ================= DATA =================
+bpoints=[deque(maxlen=512)]
+gpoints=[deque(maxlen=512)]
+rpoints=[deque(maxlen=512)]
+ypoints=[deque(maxlen=512)]
+
+blue_i=green_i=red_i=yellow_i=0
+
+colors=[(255,0,0),(0,255,0),(0,0,255),(0,255,255)]
+colorNames=["BLUE","GREEN","RED","YELLOW"]
+colorCodes=["B","G","R","Y"]
+colorIndex=0
+
+# ================= CANVAS =================
+H, W = 480, 640
+TOP_BAR = 80
+BOTTOM_BAR = 40
+
+paintWindow = np.ones((H,W,3), dtype=np.uint8)*255
+
+# ================= UI =================
+def draw_ui(img):
+    # Top bar
+    cv2.rectangle(img,(0,0),(W,TOP_BAR),(40,40,40),-1)
+
+    buttons = [
+        ("CLEAR",(10,10,110,60),(0,0,255)),
+        ("BLUE",(130,10,240,60),(255,0,0)),
+        ("GREEN",(260,10,390,60),(0,255,0)),
+        ("RED",(410,10,520,60),(0,0,255)),
+        ("YELLOW",(540,10,630,60),(0,255,255))
+    ]
+
+    for i,(txt,(x1,y1,x2,y2),clr) in enumerate(buttons):
+        cv2.rectangle(img,(x1,y1),(x2,y2),clr,2)
+        cv2.putText(img,txt,(x1+10,y2-18),
+                    cv2.FONT_HERSHEY_SIMPLEX,0.6,clr,2)
+
+        if i-1 == colorIndex:
+            cv2.rectangle(img,(x1-3,y1-3),(x2+3,y2+3),(255,255,255),2)
+
+    # Bottom bar
+    cv2.rectangle(img,(0,H-BOTTOM_BAR),(W,H),(50,50,50),-1)
+    cv2.putText(img,
+        f"Active Color: {colorNames[colorIndex]} | C = Clear | Q = Quit",
+        (10,H-12),cv2.FONT_HERSHEY_SIMPLEX,0.5,(255,255,255),1)
+
+# ================= CAMERA =================
+cap=cv2.VideoCapture(0)
+
+while True:
+    ret,frame=cap.read()
+    if not ret: break
+
+    frame=cv2.flip(frame,1)
+    hsv=cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+
+    u_h=cv2.getTrackbarPos("Upper Hue","Color detectors")
+    u_s=cv2.getTrackbarPos("Upper Saturation","Color detectors")
+    u_v=cv2.getTrackbarPos("Upper Value","Color detectors")
+    l_h=cv2.getTrackbarPos("Lower Hue","Color detectors")
+    l_s=cv2.getTrackbarPos("Lower Saturation","Color detectors")
+    l_v=cv2.getTrackbarPos("Lower Value","Color detectors")
+
+    mask=cv2.inRange(hsv,np.array([l_h,l_s,l_v]),np.array([u_h,u_s,u_v]))
+    mask=cv2.erode(mask,kernel,1)
+    mask=cv2.dilate(mask,kernel,2)
+
+    cnts,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+
+    draw_ui(frame)
+    draw_ui(paintWindow)
+
+    if cnts:
+        cnt=max(cnts,key=cv2.contourArea)
+        M=cv2.moments(cnt)
+
+        if M["m00"]!=0:
+            center=(int(M["m10"]/M["m00"]),int(M["m01"]/M["m00"]))
+            cv2.circle(frame,center,5,colors[colorIndex],-1)
+
+            if center[1] <= TOP_BAR:
+                x=center[0]
+                if 10<=x<=110:
+                    bpoints=[deque(maxlen=512)]
+                    gpoints=[deque(maxlen=512)]
+                    rpoints=[deque(maxlen=512)]
+                    ypoints=[deque(maxlen=512)]
+                    blue_i=green_i=red_i=yellow_i=0
+                    paintWindow[TOP_BAR:H-BOTTOM_BAR,:,:]=255
+                    try: requests.get(CLEAR_URL,timeout=0.01)
+                    except: pass
+                elif 130<=x<=240: colorIndex=0
+                elif 260<=x<=390: colorIndex=1
+                elif 410<=x<=520: colorIndex=2
+                elif 540<=x<=630: colorIndex=3
+            else:
+                if colorIndex==0: bpoints[blue_i].appendleft(center)
+                elif colorIndex==1: gpoints[green_i].appendleft(center)
+                elif colorIndex==2: rpoints[red_i].appendleft(center)
+                elif colorIndex==3: ypoints[yellow_i].appendleft(center)
+
+                if time.time()-last_send>SEND_DELAY:
+                    if abs(center[0]-last_x)>MOVE_THRESHOLD or abs(center[1]-last_y)>MOVE_THRESHOLD:
+                        try:
+                            requests.get(DRAW_URL,params={
+                                "x":center[0],"y":center[1],
+                                "c":colorCodes[colorIndex]},timeout=0.01)
+                            last_x,last_y=center
+                            last_send=time.time()
+                        except: pass
+    else:
+        if colorIndex==0: bpoints.append(deque(maxlen=512)); blue_i+=1
+        elif colorIndex==1: gpoints.append(deque(maxlen=512)); green_i+=1
+        elif colorIndex==2: rpoints.append(deque(maxlen=512)); red_i+=1
+        elif colorIndex==3: ypoints.append(deque(maxlen=512)); yellow_i+=1
+
+    points=[bpoints,gpoints,rpoints,ypoints]
+    for i in range(4):
+        for j in range(len(points[i])):
+            for k in range(1,len(points[i][j])):
+                if points[i][j][k-1] and points[i][j][k]:
+                    cv2.line(frame,points[i][j][k-1],points[i][j][k],colors[i],2)
+                    cv2.line(paintWindow,points[i][j][k-1],points[i][j][k],colors[i],2)
+
+    cv2.imshow("Tracking",frame)
+    cv2.imshow("Paint",paintWindow)
+    cv2.imshow("Mask",mask)
+
+    key=cv2.waitKey(1)&0xFF
+    if key==ord('c'):
+        bpoints=[deque(maxlen=512)]
+        gpoints=[deque(maxlen=512)]
+        rpoints=[deque(maxlen=512)]
+        ypoints=[deque(maxlen=512)]
+        blue_i=green_i=red_i=yellow_i=0
+        paintWindow[TOP_BAR:H-BOTTOM_BAR,:,:]=255
+        try: requests.get(CLEAR_URL,timeout=0.01)
+        except: pass
+    if key==ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
