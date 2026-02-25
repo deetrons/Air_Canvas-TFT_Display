@@ -1,0 +1,62 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include <SPI.h>
+
+// ===== WIFI =====
+const char* ssid = "";
+const char* password = "";
+
+// ===== TFT =====
+#define TFT_CS   D8
+#define TFT_RST  D4
+#define TFT_DC   D3
+
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+ESP8266WebServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+
+  tft.initR(INITR_BLACKTAB);
+  tft.setRotation(1);
+  tft.fillScreen(ST77XX_BLACK);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+
+  Serial.println("Connected!");
+  Serial.println(WiFi.localIP());
+
+  server.on("/draw", handleDraw);
+  server.on("/clear", handleClear);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
+
+void handleDraw() {
+  int x = server.arg("x").toInt();
+  int y = server.arg("y").toInt();
+  String c = server.arg("c");
+
+  int tftX = map(x, 0, 640, 0, 160);
+  int tftY = map(y, 0, 480, 0, 128);
+
+  uint16_t color = ST77XX_WHITE;
+  if (c == "B") color = ST77XX_BLUE;
+  if (c == "G") color = ST77XX_GREEN;
+  if (c == "R") color = ST77XX_RED;
+  if (c == "Y") color = ST77XX_YELLOW;
+
+  tft.fillCircle(tftX, tftY, 2, color);
+  server.send(200, "text/plain", "OK");
+}
+
+void handleClear() {
+  tft.fillScreen(ST77XX_BLACK);
+  server.send(200, "text/plain", "CLEARED");
+}
